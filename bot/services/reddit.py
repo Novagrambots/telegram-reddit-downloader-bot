@@ -13,10 +13,12 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import urljoin
 
 import aiohttp
 
 from bot.config import settings
+from bot.utils.helpers import clean_reddit_url, is_direct_media_url, is_share_url
 from bot.utils.video_meta import has_audio_stream
 
 logger = logging.getLogger(__name__)
@@ -151,8 +153,21 @@ class RedditDownloader:
         t_start = time.monotonic()
         need_ytdlp = False  # пост с внешней ссылкой — нужен yt-dlp
 
+        # прямая ссылка на картинку (i.redd.it) — пост не нужен, качаем как есть
+        if is_direct_media_url(url):
+            info = self._direct_media_info(url)
+            if info:
+                logger.info("[METRIC] get_info 0.00s source=direct type=%s", info.media_type)
+                return info
+
+        # JSON API понимает только ссылки на пост. Для остальных (share-ссылка,
+        # которую не удалось раскрыть, v.redd.it) — сразу yt-dlp, а НЕ "пост без медиа".
+        json_supported = self._make_json_url(url) is not None
+        if not json_supported:
+            logger.info("JSON API не поддерживает ссылку %s — пробуем yt-dlp", url)
+
         # попробуем JSON API — быстрее и даёт галереи
-        for source, proxy in self._proxy_chain_http():
+        for source, proxy in (self._proxy_chain_http() if json_supported else []):
             try:
                 info = await self._get_info_json(url, proxy)
                 if info:
@@ -175,7 +190,7 @@ class RedditDownloader:
                 self._fire_source_failed(source, e)
 
         # yt-dlp: либо JSON API не ответил, либо пост с внешней ссылкой
-        if not need_ytdlp:
+        if json_supported and not need_ytdlp:
             # JSON API не ответил ни через один источник — yt-dlp как последний шанс
             logger.info("JSON API недоступен — пробуем yt-dlp напрямую")
 
@@ -194,6 +209,67 @@ class RedditDownloader:
                 self._fire_source_failed(source, e)
 
         raise RuntimeError("Не удалось получить информацию о посте")
+
+    # === Раскрытие share-ссылок ===
+
+    async def resolve_url(self, url: str) -> str:
+        """Раскрывает share-ссылку (reddit.com/r/<sub>/s/<code>) и v.redd.it в ссылку на пост.
+
+        Кнопка "Поделиться" в приложении Reddit даёт именно /s/ ссылки.
+        Reddit отвечает редиректом на /r/<sub>/comments/<id>/...
+        Если раскрыть не удалось — возвращаем исходную ссылку (дальше попробует yt-dlp).
+        """
+        if not (is_share_url(url) or re.match(r"^https?://v\.redd\.it/\w+", url, re.IGNORECASE)):
+            return url
+
+        for source, proxy in self._proxy_chain_http():
+            try:
+                resolved = await self._follow_redirects(url, proxy)
+            except Exception as e:
+                logger.warning("Редирект %s через %s не удался: %s", url, source, e)
+                continue
+            if resolved and "/comments/" in resolved:
+                clean = clean_reddit_url(resolved)
+                logger.info("Ссылка раскрыта (%s): %s → %s", source, url, clean)
+                return clean
+            logger.warning("Редирект %s через %s привёл не на пост: %s", url, source, resolved)
+        return url
+
+    async def _follow_redirects(self, url: str, proxy: str | None, max_hops: int = 5) -> str | None:
+        """Идёт по Location вручную (тело страниц не качаем). Возвращает конечный URL."""
+        connector = None
+        if proxy and proxy.startswith("socks5://"):
+            from aiohttp_socks import ProxyConnector
+            connector = ProxyConnector.from_url(proxy)
+
+        timeout = aiohttp.ClientTimeout(total=15)
+        headers = {"User-Agent": REDDIT_USER_AGENT}
+        current = url
+
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            for _ in range(max_hops):
+                async with session.get(current, headers=headers, allow_redirects=False) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location")
+                        if not location:
+                            return None
+                        current = urljoin(current, location)
+                        if "/comments/" in current:
+                            return current
+                        continue
+                    if resp.status == 200:
+                        return str(resp.url)
+                    raise RuntimeError(f"HTTP {resp.status}")
+        return current
+
+    def _direct_media_info(self, url: str) -> MediaInfo | None:
+        """MediaInfo для прямой ссылки i.redd.it/<file>.<ext>"""
+        path = url.lower().split("?")[0]
+        if path.endswith(".gif"):
+            return MediaInfo(title="Reddit GIF", media_type="gif", direct_url=url)
+        if path.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return MediaInfo(title="Reddit Photo", media_type="photo", direct_url=url)
+        return None
 
     def _proxy_chain_http(self) -> list[tuple[str, str | None]]:
         """Цепочка прокси для HTTP-запросов: SOCKS5 proxy → WARP"""
@@ -245,15 +321,20 @@ class RedditDownloader:
         match = re.search(r"(reddit\.com/r/\w+/comments/\w+(?:/\w+)?)", url)
         if match:
             return f"https://www.{match.group(1)}.json"
+        # reddit.com/user/<name>/comments/<id> и reddit.com/comments/<id>
+        match = re.search(r"reddit\.com/(?:(?:u|user)/[\w-]+/)?comments/(\w+)", url)
+        if match:
+            return f"https://www.reddit.com/comments/{match.group(1)}.json"
         # reddit.com/gallery/xxx
         match = re.search(r"reddit\.com/gallery/(\w+)", url)
         if match:
             return f"https://www.reddit.com/comments/{match.group(1)}.json"
-        # redd.it/xxx (short link)
-        match = re.search(r"redd\.it/(\w+)", url)
+        # redd.it/xxx (короткая ссылка на пост). v.redd.it / i.redd.it — это ID медиа,
+        # а не поста: по ним JSON API отдаст 404, их не берём.
+        match = re.search(r"(?<![\w.-])redd\.it/(\w+)", url)
         if match:
             return f"https://www.reddit.com/comments/{match.group(1)}.json"
-        # reddit.com/r/xxx/s/xxx (share link) — нужен редирект, JSON API не поддерживает
+        # share-ссылка (/s/), которую не удалось раскрыть, и прочее — JSON API не поддерживает
         return None
 
     def _parse_reddit_json(self, data: list | dict, original_url: str) -> MediaInfo | None:

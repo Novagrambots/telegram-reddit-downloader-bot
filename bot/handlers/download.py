@@ -30,7 +30,7 @@ from bot.database.crud import (
 from bot.i18n import t
 from bot.keyboards.inline import get_back_keyboard, get_quality_keyboard
 from bot.services.reddit import FileTooLargeError, classify_error, downloader
-from bot.utils.helpers import clean_reddit_url, is_reddit_url
+from bot.utils.helpers import clean_reddit_url, extract_reddit_url
 from bot.utils.video_meta import get_video_meta
 from bot.config import settings
 from bot.emojis import E
@@ -65,12 +65,13 @@ async def handle_reddit_link(message: Message, state: FSMContext) -> None:
     async with async_session() as session:
         lang = await get_user_language(session, message.from_user.id)
 
-    if not is_reddit_url(text):
+    # ссылка может быть в любом месте текста ("Глянь: https://...")
+    found_url = extract_reddit_url(text)
+    if not found_url:
         await message.answer(t("download.not_reddit", lang), parse_mode="HTML")
         return
 
-    clean_url = clean_reddit_url(text)
-    await _process_reddit_link(message, clean_url, message.from_user, lang, state)
+    await _process_reddit_link(message, found_url, message.from_user, lang, state)
 
 
 async def _process_reddit_link(
@@ -78,6 +79,11 @@ async def _process_reddit_link(
 ) -> None:
     """Обрабатывает Reddit ссылку: получает инфо, определяет тип, скачивает"""
     status_msg = await message.answer(t("download.fetching_info", lang))
+
+    # нормализуем ссылку: pending_url (после подписки) приходит сырым текстом,
+    # share-ссылку (/s/) и v.redd.it раскрываем в ссылку на пост — она же ключ кэша
+    url = clean_reddit_url(extract_reddit_url(url) or url)
+    url = await downloader.resolve_url(url)
 
     try:
         info = await downloader.get_info(url)
