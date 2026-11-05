@@ -43,7 +43,7 @@ _FALLBACK_ALERT_THROTTLE = 600
 _last_fallback_alert: dict[str, float] = {}
 
 _ERROR_CATEGORY_LABELS = {
-    "auth_required": "Reddit требует авторизацию (NSFW/приват)",
+    "auth_required": "Reddit требует вход в аккаунт — загрузи/обнови cookies: /update_cookies",
     "ip_blocked": "Reddit заблокировал IP — нужна ротация прокси",
     "network": "Сетевая ошибка (таймаут/нет связи)",
     "unknown": "Неизвестная ошибка",

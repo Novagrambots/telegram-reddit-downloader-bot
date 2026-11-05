@@ -8,6 +8,7 @@ def get_admin_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t("btn.admin_stats", lang), callback_data="admin_stats", style="primary", icon_custom_emoji_id=E_ID["chart"])],
         [InlineKeyboardButton(text=t("btn.admin_channels", lang), callback_data="admin_channels", style="primary", icon_custom_emoji_id=E_ID["megaphone"])],
+        [InlineKeyboardButton(text=t("btn.admin_cookies", lang), callback_data="admin_cookies", style="primary", icon_custom_emoji_id=E_ID["lock"])],
         [InlineKeyboardButton(text=t("btn.admin_broadcast", lang), callback_data="admin_broadcast", style="danger", icon_custom_emoji_id=E_ID["plane"])],
         [InlineKeyboardButton(text=t("btn.admin_home", lang), callback_data="back_to_menu", style="success", icon_custom_emoji_id=E_ID["home"])],
     ])

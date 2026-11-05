@@ -1,6 +1,7 @@
 """Админ-панель"""
 import logging
 import asyncio
+import time
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -48,6 +49,34 @@ async def cmd_admin(message: Message) -> None:
         return
     lang = await _get_lang(message.from_user.id)
     await message.answer(t("admin.title", lang), reply_markup=get_admin_keyboard(lang))
+
+
+@router.callback_query(F.data == "admin_cookies")
+async def admin_cookies_info(callback: CallbackQuery) -> None:
+    """Показывает статус cookies аккаунта Reddit"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer(f"{E['lock']} Нет доступа")
+        return
+    lang = await _get_lang(callback.from_user.id)
+
+    from bot.services.reddit import downloader
+
+    cookies = downloader.cookies_status()
+    if not cookies.exists:
+        status = t("admin.cookies_missing", lang)
+    elif not cookies.valid:
+        status = t("admin.cookies_invalid", lang)
+    else:
+        age = f"{cookies.age_days:.0f}" if cookies.age_days is not None else "?"
+        until = time.strftime("%d.%m.%Y", time.localtime(cookies.expires_at)) if cookies.expires_at else "?"
+        status = t("admin.cookies_active", lang, age=age, until=until)
+
+    await callback.message.edit_text(
+        t("admin.cookies_info", lang, status=status),
+        reply_markup=get_admin_keyboard(lang),
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_stats")

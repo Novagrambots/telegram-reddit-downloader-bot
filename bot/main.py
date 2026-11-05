@@ -47,9 +47,10 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    from bot.handlers import start, download, admin
+    from bot.handlers import start, download, admin, cookies
     dp.include_router(start.router)
     dp.include_router(admin.router)
+    dp.include_router(cookies.router)  # /update_cookies — до download, он ловит любой текст
     dp.include_router(download.router)  # последний — ловит F.text
 
     download.setup_fallback_alerts(bot)

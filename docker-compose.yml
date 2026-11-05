@@ -17,6 +17,8 @@ services:
       - /tmp/reddit_bot:/tmp/reddit_bot
       - bot-api-data:/var/lib/telegram-bot-api
       - /var/run/docker.sock:/var/run/docker.sock
+      # cookies аккаунта Reddit (обновляются через /update_cookies) — без них Reddit блокирует
+      - ./cookies:/app/cookies
 
   # Local Bot API — файлы до 2 ГБ
   bot-api:

@@ -9,11 +9,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -28,6 +29,76 @@ WARP_PROXY = "socks5://warp:9091"
 
 # User-Agent для Reddit API (Reddit блокирует дефолтные)
 REDDIT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+# cookies залогиненного аккаунта (обновляются через /update_cookies, volume ./cookies).
+# Без входа в аккаунт Reddit отвечает 403 "You've been blocked by network security"
+# на любой IP — и резидентный прокси, и WARP.
+COOKIES_DIR = "/app/cookies"
+COOKIES_PATH = os.path.join(COOKIES_DIR, "cookies.txt")
+# кука, которая есть только у залогиненного аккаунта (token_v2 бывает и у анонима)
+SESSION_COOKIE = "reddit_session"
+
+
+@dataclass
+class CookiesStatus:
+    """Состояние файла cookies"""
+    exists: bool
+    valid: bool               # есть живая reddit_session (аккаунт залогинен)
+    age_days: float | None    # сколько дней назад загружен файл
+    expires_at: float | None  # когда истекает reddit_session (unix time), None — сессионная
+
+    @property
+    def usable(self) -> bool:
+        return self.exists and self.valid
+
+
+def parse_netscape_cookies(path: str) -> list[tuple[str, str, str, int]]:
+    """Читает cookies.txt (формат Netscape) → [(domain, name, value, expires)].
+
+    Строки "#HttpOnly_<domain>..." — это настоящие куки (так их пишут
+    расширения браузера), остальные строки с # — комментарии.
+    """
+    result = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 7:
+                continue
+            domain, _, _, _, expires, name, value = parts
+            try:
+                exp = int(float(expires))
+            except ValueError:
+                exp = 0
+            result.append((domain.lower(), name, value, exp))
+    return result
+
+
+def is_reddit_domain(domain: str) -> bool:
+    """reddit.com или его поддомен (notreddit.com — нет)"""
+    domain = domain.lstrip(".").lower()
+    return domain == "reddit.com" or domain.endswith(".reddit.com")
+
+
+def reddit_cookies_status(path: str = COOKIES_PATH) -> CookiesStatus:
+    """Проверяет файл cookies: есть ли живая сессия Reddit"""
+    if not os.path.isfile(path):
+        return CookiesStatus(exists=False, valid=False, age_days=None, expires_at=None)
+    age_days = (time.time() - os.path.getmtime(path)) / 86400
+    try:
+        cookies = parse_netscape_cookies(path)
+    except OSError as e:
+        logger.warning("Не удалось прочитать cookies: %s", e)
+        return CookiesStatus(exists=True, valid=False, age_days=age_days, expires_at=None)
+    now = time.time()
+    for domain, name, _, exp in cookies:
+        if name == SESSION_COOKIE and is_reddit_domain(domain) and (exp == 0 or exp > now):
+            return CookiesStatus(exists=True, valid=True, age_days=age_days, expires_at=exp or None)
+    return CookiesStatus(exists=True, valid=False, age_days=age_days, expires_at=None)
 
 
 @dataclass
@@ -77,7 +148,13 @@ class _ExternalLink(Exception):
 def classify_error(error_msg: str) -> str:
     """Классифицирует ошибку в категорию для алертов."""
     msg = error_msg.lower()
-    if "403" in msg or "forbidden" in msg or "blocked" in msg or "rate limit" in msg:
+    # "blocked by network security" / yt-dlp "Account authentication is required":
+    # Reddit не пускает без входа в аккаунт — смена IP не поможет, нужны cookies
+    if "network security" in msg or "authentication is required" in msg:
+        return "auth_required"
+    # yt-dlp с cookies, но Reddit всё равно не пускает: "Your IP address is unable to access the Reddit API"
+    if ("403" in msg or "forbidden" in msg or "blocked" in msg or "rate limit" in msg
+            or "unable to access the reddit api" in msg):
         return "ip_blocked"
     if "login" in msg or "nsfw" in msg or "private" in msg or "quarantine" in msg:
         return "auth_required"
@@ -97,6 +174,8 @@ class RedditDownloader:
         self.download_dir = tempfile.mkdtemp(prefix="reddit_bot_")
         self._proxy = settings.proxy_url or None
         self.on_source_failed: Callable[[str, str], None] | None = None
+        # кэш разобранного cookies.txt: (mtime файла, строка заголовка Cookie)
+        self._cookie_cache: tuple[float, str] | None = None
 
         # Fallback-цепочка: SOCKS5 proxy → WARP
         if self._proxy:
@@ -122,6 +201,65 @@ class RedditDownloader:
                     logger.info("Очистка старого файла: %s", filename)
         except OSError as e:
             logger.warning("Ошибка при очистке: %s", e)
+
+    # === Cookies аккаунта Reddit ===
+
+    def cookies_status(self) -> CookiesStatus:
+        return reddit_cookies_status(COOKIES_PATH)
+
+    def has_cookies(self) -> bool:
+        """Есть ли cookies залогиненного аккаунта"""
+        return self.cookies_status().usable
+
+    def _cookie_header(self) -> str | None:
+        """Заголовок Cookie для reddit.com (None — cookies нет или сессия мёртвая)"""
+        try:
+            mtime = os.path.getmtime(COOKIES_PATH)
+        except OSError:
+            return None
+        if self._cookie_cache and self._cookie_cache[0] == mtime:
+            return self._cookie_cache[1] or None
+        header = ""
+        if self.has_cookies():
+            now = time.time()
+            jar: dict[str, str] = {}
+            for domain, name, value, exp in parse_netscape_cookies(COOKIES_PATH):
+                if is_reddit_domain(domain) and (exp == 0 or exp > now):
+                    jar[name] = value
+            header = "; ".join(f"{k}={v}" for k, v in jar.items())
+        self._cookie_cache = (mtime, header)
+        return header or None
+
+    def _reddit_headers(self, url: str) -> dict:
+        """Заголовки запроса. Cookie — только для reddit.com, чужим хостам (imgur и т.п.) не шлём."""
+        headers = {"User-Agent": REDDIT_USER_AGENT}
+        if is_reddit_domain(urlsplit(url).hostname or ""):
+            cookie = self._cookie_header()
+            if cookie:
+                headers["Cookie"] = cookie
+        return headers
+
+    def _run_ytdlp(self, url: str, opts: dict, download: bool) -> dict | None:
+        """Запуск yt-dlp. С cookies — на временной копии файла:
+        yt-dlp перезаписывает cookiefile при выходе, а запросов параллельно много.
+        """
+        import yt_dlp
+
+        tmp_cookies = None
+        if self.has_cookies():
+            fd, tmp_cookies = tempfile.mkstemp(prefix="reddit_cookies_", suffix=".txt")
+            os.close(fd)
+            shutil.copyfile(COOKIES_PATH, tmp_cookies)
+            opts = {**opts, "cookiefile": tmp_cookies}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        finally:
+            if tmp_cookies:
+                try:
+                    os.remove(tmp_cookies)
+                except OSError:
+                    pass
 
     # === Proxy opts для yt-dlp ===
 
@@ -243,11 +381,11 @@ class RedditDownloader:
             connector = ProxyConnector.from_url(proxy)
 
         timeout = aiohttp.ClientTimeout(total=15)
-        headers = {"User-Agent": REDDIT_USER_AGENT}
         current = url
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             for _ in range(max_hops):
+                headers = self._reddit_headers(current)
                 async with session.get(current, headers=headers, allow_redirects=False) as resp:
                     if resp.status in (301, 302, 303, 307, 308):
                         location = resp.headers.get("Location")
@@ -300,11 +438,23 @@ class RedditDownloader:
             connector = ProxyConnector.from_url(proxy)
 
         timeout = aiohttp.ClientTimeout(total=15)
-        headers = {"User-Agent": REDDIT_USER_AGENT}
+        headers = self._reddit_headers(json_url)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(json_url, headers=headers, allow_redirects=True) as resp:
                 if resp.status == 403:
+                    # фраза в самом конце ~190 КБ страницы (перед ней большой <style>) — читаем целиком
+                    body = (await resp.text(errors="replace")).lower()
+                    if "network security" in body:
+                        if "Cookie" in headers:
+                            raise RuntimeError(
+                                "403 network security — cookies Reddit не помогли "
+                                "(сессия истекла?), обнови через /update_cookies"
+                            )
+                        raise RuntimeError(
+                            "403 network security — Reddit пускает только залогиненных, "
+                            "загрузи cookies через /update_cookies"
+                        )
                     raise RuntimeError("403 Forbidden — IP заблокирован Reddit")
                 if resp.status == 404:
                     raise RuntimeError("404 — пост не найден или удалён")
@@ -597,9 +747,7 @@ class RedditDownloader:
         return result
 
     def _extract_info(self, url: str, opts: dict) -> dict | None:
-        import yt_dlp
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+        return self._run_ytdlp(url, opts, download=False)
 
     # === Скачивание видео ===
 
@@ -1041,9 +1189,7 @@ class RedditDownloader:
                         f.write(chunk)
 
     def _download_ytdlp(self, url: str, opts: dict) -> dict:
-        import yt_dlp
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=True)
+        return self._run_ytdlp(url, opts, download=True)
 
     def _find_downloaded_file(self, info: dict, expected_ext: str) -> str | None:
         video_id = info.get("id", "")

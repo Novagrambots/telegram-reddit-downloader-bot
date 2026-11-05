@@ -468,6 +468,44 @@ TRANSLATIONS = {
     "btn.admin_cancel_del": {"ru": "Отмена", "uz": "Bekor qilish", "en": "Cancel"},
     "btn.admin_panel": {"ru": "Админ-панель", "uz": "Admin panel", "en": "Admin panel"},
     "btn.admin_broadcast": {"ru": "Рассылка", "uz": "Xabar yuborish", "en": "Broadcast"},
+    "btn.admin_cookies": {"ru": "Cookies", "uz": "Cookies", "en": "Cookies"},
+
+    # === Cookies аккаунта Reddit ===
+    "admin.cookies_info": {
+        "ru": (
+            f"{E['folder']} <b>Reddit Cookies</b>\n\n"
+            "Статус: {status}\n\n"
+            "Без входа в аккаунт Reddit блокирует бота. "
+            "Для обновления отправь /update_cookies и прикрепи файл cookies.txt"
+        ),
+        "uz": (
+            f"{E['folder']} <b>Reddit Cookies</b>\n\n"
+            "Holat: {status}\n\n"
+            "Akkauntga kirmasdan Reddit botni bloklaydi. "
+            "Yangilash uchun /update_cookies yubor va cookies.txt faylini biriktir"
+        ),
+        "en": (
+            f"{E['folder']} <b>Reddit Cookies</b>\n\n"
+            "Status: {status}\n\n"
+            "Without a logged-in account Reddit blocks the bot. "
+            "To update, send /update_cookies and attach the cookies.txt file"
+        ),
+    },
+    "admin.cookies_active": {
+        "ru": f"{E['check']} Активны (загружены {{age}} дн. назад, сессия до {{until}})",
+        "uz": f"{E['check']} Faol ({{age}} kun oldin yuklangan, sessiya {{until}} gacha)",
+        "en": f"{E['check']} Active (uploaded {{age}} days ago, session until {{until}})",
+    },
+    "admin.cookies_missing": {
+        "ru": f"{E['cross']} Не загружены — Reddit отдаёт посты только залогиненным",
+        "uz": f"{E['cross']} Yuklanmagan — Reddit postlarni faqat tizimga kirganlarga beradi",
+        "en": f"{E['cross']} Not loaded — Reddit serves posts to logged-in users only",
+    },
+    "admin.cookies_invalid": {
+        "ru": f"{E['warning']} Файл есть, но сессия (reddit_session) отсутствует или истекла — перезалей",
+        "uz": f"{E['warning']} Fayl bor, lekin sessiya (reddit_session) yo'q yoki muddati o'tgan — qayta yukla",
+        "en": f"{E['warning']} File exists but the session (reddit_session) is missing or expired — re-upload",
+    },
 
     # === Рассылка ===
     "admin.broadcast_prompt": {
