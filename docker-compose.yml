@@ -34,14 +34,16 @@ services:
 
   # Cloudflare WARP — обход блокировки Reddit
   warp:
-    image: ghcr.io/mon-ius/docker-warp-socks:v5
+    # v7 (ядро sing-box): в v5 сломалась регистрация — API Cloudflare стал отдавать 404
+    # на запрос credentials, контейнер падал в цикле и прокси был мёртв
+    image: ghcr.io/mon-ius/docker-warp-socks:v7
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -x socks5://127.0.0.1:9091 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -q warp=on"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 45s
 
   # Автоперезапуск unhealthy контейнеров
   autoheal:
