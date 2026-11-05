@@ -82,6 +82,10 @@ async def main() -> None:
                 logger.info("Фоновая очистка: удалено %d временных файлов", cleaned)
             bot_api_cutoff = now - 60 * 60
             for f in glob.glob("/var/lib/telegram-bot-api/**/*", recursive=True):
+                # *.binlog — это база самого bot-api (tqueue.binlog, td.binlog), не наши файлы.
+                # если удалить их, пока они не менялись > часа, bot-api падает с Signal 6
+                if ".binlog" in os.path.basename(f):
+                    continue
                 try:
                     if os.path.isfile(f) and os.path.getmtime(f) < bot_api_cutoff:
                         os.remove(f)
